@@ -9,4 +9,7 @@ repro*.py
 verify_*.py
 smoke_*.py
 zobcheck.py
+nps.py
+prof.py
+match_*.py
 .game.json

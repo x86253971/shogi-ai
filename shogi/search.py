@@ -30,12 +30,15 @@ class Search:
         self.history = {}
         self.eval_fn = evaluate
         self.rep = {}
+        self.max_nodes = 0
 
     def new_game(self):
         self.tt.clear()
         self.history.clear()
 
     def _check_time(self):
+        if self.max_nodes and self.nodes >= self.max_nodes:
+            raise TimeUp
         if self.nodes & 1023 == 0 and time.time() >= self.deadline:
             raise TimeUp
 
@@ -165,8 +168,10 @@ class Search:
         pos.ply = snap.ply
         pos.zob = snap.zob
 
-    def think(self, pos, max_time_s, max_depth=64, info=print, history=None):
+    def think(self, pos, max_time_s, max_depth=64, info=print, history=None,
+              max_nodes=0):
         self.nodes = 0
+        self.max_nodes = max_nodes
         self.deadline = time.time() + max_time_s
         start = time.time()
         self.rep = {}

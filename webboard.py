@@ -13,7 +13,7 @@ from shogi.position import Position, SENTE, GOTE, make_sq, sq_file, sq_rank
 from shogi.movegen import generate_legal, make_move, move_to_usi, usi_to_move
 from shogi.search import Search
 
-THINK_TIME = 1.5
+THINK_TIME = 3.0
 state = {"moves": [], "human": SENTE, "info": ""}
 lock = threading.Lock()
 

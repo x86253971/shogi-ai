@@ -263,11 +263,50 @@ def unmake_move(pos, m, captured):
     pos.zob = z
 
 
+def _make_light(pos, m):
+    """Board+king_sq-only make for legality tests (no zobrist/hands/ply)."""
+    b = pos.board
+    c = pos.turn
+    to = m_to(m)
+    if m_is_drop(m):
+        b[to] = Position.enc(c, m_from(m))
+        cap = 0
+    else:
+        frm = m_from(m)
+        v = b[frm]
+        _, pt = Position.dec(v)
+        cap = b[to]
+        newpt = PROMOTE[pt] if m_is_promo(m) else pt
+        b[to] = Position.enc(c, newpt)
+        b[frm] = 0
+        if newpt == KING:
+            pos.king_sq[c] = to
+    pos.turn = 1 - c
+    return cap
+
+
+def _unmake_light(pos, m, cap):
+    c = 1 - pos.turn
+    b = pos.board
+    to = m_to(m)
+    pos.turn = c
+    if m_is_drop(m):
+        b[to] = 0
+    else:
+        frm = m_from(m)
+        _, newpt = Position.dec(b[to])
+        pt = UNPROMOTE[newpt] if m_is_promo(m) else newpt
+        b[frm] = Position.enc(c, pt)
+        b[to] = cap
+        if pt == KING:
+            pos.king_sq[c] = frm
+
+
 def _has_any_legal(pos):
     for m in generate_pseudo(pos):
-        cap = make_move(pos, m)
+        cap = _make_light(pos, m)
         ok = not pos.in_check(1 - pos.turn)
-        unmake_move(pos, m, cap)
+        _unmake_light(pos, m, cap)
         if ok:
             return True
     return False
@@ -276,7 +315,7 @@ def _has_any_legal(pos):
 def generate_legal(pos):
     legal = []
     for m in generate_pseudo(pos):
-        cap = make_move(pos, m)
+        cap = _make_light(pos, m)
         mover = 1 - pos.turn
         if not pos.in_check(mover):
             ok = True
@@ -285,5 +324,5 @@ def generate_legal(pos):
                     ok = False
             if ok:
                 legal.append(m)
-        unmake_move(pos, m, cap)
+        _unmake_light(pos, m, cap)
     return legal

@@ -1,8 +1,8 @@
-"""Hand-crafted evaluation.
+"""Hand-crafted evaluation, with benchmarkable versions.
 
-evaluate()    - material + position + king safety (current, stronger)
-evaluate_v1() - the earlier material+light-position version, kept for
-                head-to-head benchmarking (see match.py).
+evaluate()    - v3: material + position + king-safety + king placement (PST)
+evaluate_v2() - king-safety only (no king PST)
+evaluate_v1() - material + light position only
 
 Score is from the perspective of pos.turn (positive = good to move), for negamax.
 """
@@ -31,10 +31,12 @@ VALUE[PROOK] = 1395
 
 HAND_VALUE = [int(VALUE[pt] * 1.10) for pt in range(14)]
 
-# Weight of an enemy piece menacing the squares around a king (per piece type).
 ATK = [6, 10, 10, 14, 16, 22, 28, 0, 16, 14, 14, 16, 30, 38]
-# Value of a friendly piece shielding (adjacent to) its own king.
 DEF = [8, 8, 8, 28, 32, 12, 12, 0, 24, 24, 24, 26, 16, 16]
+
+# King placement by rank, from Sente's view (rank 1 = enemy back, 9 = own back).
+# Strongly prefers staying home; punishes a king that wanders forward/centre.
+KING_RANK = [-115, -90, -68, -48, -28, -10, 6, 22, 34]
 
 MATE = 100000
 
@@ -43,7 +45,7 @@ def _cheby(a, b):
     return max(abs(sq_file(a) - sq_file(b)), abs(sq_rank(a) - sq_rank(b)))
 
 
-def evaluate(pos):
+def _core(pos, king_pst):
     b = pos.board
     ks = pos.king_sq
     score = 0
@@ -60,8 +62,7 @@ def evaluate(pos):
             adv = (9 - r) if c == SENTE else (r - 1)
             val += adv * 2
             val += 4 - abs(5 - sq_file(sq))
-        score += val if c == SENTE else -val
-        if pt != KING:
+            score += val if c == SENTE else -val
             ek = ks[1 - c]
             if ek >= 0:
                 d = _cheby(sq, ek)
@@ -70,12 +71,28 @@ def evaluate(pos):
             ok = ks[c]
             if ok >= 0 and _cheby(sq, ok) == 1:
                 shield[c] += DEF[pt]
+        else:
+            score += val if c == SENTE else -val
+            if king_pst:
+                r = sq_rank(sq)
+                if c == SENTE:
+                    score += KING_RANK[r - 1]
+                else:
+                    score -= KING_RANK[9 - r]
     for c in (SENTE, GOTE):
         h = pos.hands[c]
         s = sum(h[pt] * HAND_VALUE[pt] for pt in HAND_TYPES)
         score += s if c == SENTE else -s
     score += shield[SENTE] - danger[SENTE] - shield[GOTE] + danger[GOTE]
     return score if pos.turn == SENTE else -score
+
+
+def evaluate(pos):
+    return _core(pos, king_pst=True)
+
+
+def evaluate_v2(pos):
+    return _core(pos, king_pst=False)
 
 
 def evaluate_v1(pos):

@@ -1,11 +1,10 @@
-"""Strength match between two evaluation functions (time-bounded per move).
+"""Strength match between two evaluation functions.
 
-Each game starts from a random short opening (same for both sides) for variety,
-then both engines play with a fixed wall-clock time per move (bounded, so check
-extensions cannot explode). Colors / eval roles alternate. Repetition history is
-passed so engines avoid shuffling.
+Default mode is a fixed NODE budget per move: deterministic and fast, so few
+games give a clean signal. Random short openings add variety; repetition
+history is passed so engines avoid shuffling.
 
-Usage: python match.py [games] [seconds_per_move]
+Usage: python match.py [games] [nodes_per_move]
 """
 
 import random
@@ -13,7 +12,9 @@ import sys
 from shogi.position import Position, SENTE, GOTE
 from shogi.movegen import generate_legal, make_move, usi_to_move, move_to_usi
 from shogi.search import Search
-from shogi.evaluate import evaluate, evaluate_v1
+from shogi.evaluate import evaluate, evaluate_v2, evaluate_v1
+
+BIG_T = 10 ** 9
 
 
 def random_opening(seed, plies=4):
@@ -30,7 +31,7 @@ def random_opening(seed, plies=4):
     return moves
 
 
-def play_game(eval_sente, eval_gote, time_s, opening, max_ply=160):
+def play_game(eval_sente, eval_gote, nodes, opening, max_ply=160):
     pos = Position.startpos()
     hist = [pos.zob]
     for mv in opening:
@@ -43,34 +44,39 @@ def play_game(eval_sente, eval_gote, time_s, opening, max_ply=160):
         if not legal:
             return GOTE if pos.turn == SENTE else SENTE
         s = sA if pos.turn == SENTE else sB
-        best = s.think(pos, time_s, max_depth=20, info=lambda *_: None,
-                       history=hist[:-1])
+        best = s.think(pos, BIG_T, max_depth=30, info=lambda *_: None,
+                       history=hist[:-1], max_nodes=nodes)
         make_move(pos, best)
         hist.append(pos.zob)
     return None
 
 
+# A = challenger, B = baseline. Edit these two to choose what to compare.
+EVAL_A, NAME_A = evaluate, "v3-kingPST"
+EVAL_B, NAME_B = evaluate_v2, "v2-kingsafety"
+
+
 def main():
-    games = int(sys.argv[1]) if len(sys.argv) > 1 else 10
-    time_s = float(sys.argv[2]) if len(sys.argv) > 2 else 0.1
-    new_pts = old_pts = draws = 0
+    games = int(sys.argv[1]) if len(sys.argv) > 1 else 12
+    nodes = int(sys.argv[2]) if len(sys.argv) > 2 else 4000
+    a_pts = b_pts = draws = 0
     for g in range(games):
-        opening = random_opening(2000 + g)
-        new_is_sente = (g % 2 == 0)
-        if new_is_sente:
-            winner = play_game(evaluate, evaluate_v1, time_s, opening)
-            new_color = SENTE
+        opening = random_opening(3000 + g)
+        a_is_sente = (g % 2 == 0)
+        if a_is_sente:
+            winner = play_game(EVAL_A, EVAL_B, nodes, opening)
+            a_color = SENTE
         else:
-            winner = play_game(evaluate_v1, evaluate, time_s, opening)
-            new_color = GOTE
+            winner = play_game(EVAL_B, EVAL_A, nodes, opening)
+            a_color = GOTE
         if winner is None:
             draws += 1; res = "draw"
-        elif winner == new_color:
-            new_pts += 1; res = "NEW wins"
+        elif winner == a_color:
+            a_pts += 1; res = f"{NAME_A} wins"
         else:
-            old_pts += 1; res = "old wins"
-        print(f"game {g+1}/{games} (new={'S' if new_is_sente else 'G'}): {res}", flush=True)
-    print(f"\nRESULT  NEW(king-safety) {new_pts} - {old_pts} old   draws {draws}", flush=True)
+            b_pts += 1; res = f"{NAME_B} wins"
+        print(f"game {g+1}/{games}: {res}", flush=True)
+    print(f"\nRESULT  {NAME_A} {a_pts} - {b_pts} {NAME_B}   draws {draws}", flush=True)
 
 
 if __name__ == "__main__":
