@@ -87,6 +87,7 @@ def main():
             out("readyok")
         elif cmd == "usinewgame":
             pos = Position.startpos()
+            search.new_game()
         elif cmd.startswith("position"):
             pos = parse_position(cmd)
         elif cmd.startswith("go"):

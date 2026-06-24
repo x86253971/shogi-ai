@@ -1,9 +1,11 @@
-"""Shogi board representation, SFEN I/O, move generation, attack detection.
+"""Shogi board representation, SFEN I/O, attack detection, Zobrist hashing.
 
-Square indexing: sq = (rank-1)*9 + (9-file), so sq 0 = file9/rank1 (top-left in
-SFEN reading order), sq 80 = file1/rank9. Sente (Black, color 0) moves toward
-rank 1 (index decreasing). Gote (White, color 1) moves toward rank 9.
+Square indexing: sq = (rank-1)*9 + (9-file), so sq 0 = file9/rank1, sq 80 =
+file1/rank9. Sente (Black, color 0) moves toward rank 1 (index decreasing).
+Gote (White, color 1) moves toward rank 9.
 """
+
+import random as _random
 
 PAWN, LANCE, KNIGHT, SILVER, GOLD, BISHOP, ROOK, KING = range(8)
 PPAWN, PLANCE, PKNIGHT, PSILVER, PBISHOP, PROOK = range(8, 14)
@@ -23,6 +25,17 @@ SFEN_PROM_CHAR = {PPAWN: "P", PLANCE: "L", PKNIGHT: "N", PSILVER: "S",
                   PBISHOP: "B", PROOK: "R"}
 CHAR_TO_TYPE = {"P": PAWN, "L": LANCE, "N": KNIGHT, "S": SILVER,
                 "G": GOLD, "B": BISHOP, "R": ROOK, "K": KING}
+
+# Display glyphs (romaji), lowercase for Gote, "+" prefix for promoted.
+DISP = ["P", "L", "N", "S", "G", "B", "R", "K",
+        "+P", "+L", "+N", "+S", "+B", "+R"]
+
+# --- Zobrist tables (fixed seed for reproducibility) ---
+_rng = _random.Random(0xC0FFEE)
+ZOB_PIECE = [[_rng.getrandbits(64) for _ in range(29)] for _ in range(81)]
+ZOB_HAND = [[[_rng.getrandbits(64) for _ in range(19)] for _ in range(7)]
+            for _ in range(2)]
+ZOB_SIDE = _rng.getrandbits(64)
 
 
 def sq_file(sq):
@@ -45,7 +58,6 @@ def usi_to_sq(s):
     return make_sq(int(s[0]), ord(s[1]) - ord("a") + 1)
 
 
-# Step/slide tables as (d_rank, d_file). Sente forward = rank decreases.
 _GOLD_STEPS_S = [(-1, 0), (-1, -1), (-1, 1), (0, -1), (0, 1), (1, 0)]
 _SILVER_STEPS_S = [(-1, 0), (-1, -1), (-1, 1), (1, -1), (1, 1)]
 _KING_STEPS = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
@@ -72,7 +84,7 @@ def step_targets(sq, steps):
 
 
 class Position:
-    __slots__ = ("board", "hands", "turn", "ply", "king_sq", "history")
+    __slots__ = ("board", "hands", "turn", "ply", "king_sq", "zob")
 
     def __init__(self):
         self.board = [0] * 81
@@ -80,7 +92,7 @@ class Position:
         self.turn = SENTE
         self.ply = 1
         self.king_sq = [-1, -1]
-        self.history = []
+        self.zob = 0
 
     @staticmethod
     def enc(color, ptype):
@@ -98,7 +110,7 @@ class Position:
         p.turn = self.turn
         p.ply = self.ply
         p.king_sq = self.king_sq[:]
-        p.history = self.history[:]
+        p.zob = self.zob
         return p
 
     @classmethod
@@ -137,12 +149,29 @@ class Position:
                 ptype = CHAR_TO_TYPE[ch.upper()]
                 p.hands[color][ptype] += num if num else 1
                 num = 0
+        p.zob = p.compute_zobrist()
         return p
 
     @classmethod
     def startpos(cls):
         return cls.from_sfen(
             "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
+
+    def compute_zobrist(self):
+        h = 0
+        for sq in range(81):
+            v = self.board[sq]
+            if v:
+                h ^= ZOB_PIECE[sq][v]
+        for c in (SENTE, GOTE):
+            hc = self.hands[c]
+            for pt in range(7):
+                cnt = hc[pt]
+                if cnt:
+                    h ^= ZOB_HAND[c][pt][cnt]
+        if self.turn == GOTE:
+            h ^= ZOB_SIDE
+        return h
 
     def to_sfen(self):
         rows = []
@@ -178,9 +207,6 @@ class Position:
         if not hand_s:
             hand_s = "-"
         return f"{board_s} {turn_s} {hand_s} {self.ply}"
-
-    def key(self):
-        return self.to_sfen().rsplit(" ", 1)[0]
 
     def is_attacked(self, sq, opp):
         b = self.board
@@ -219,7 +245,6 @@ class Position:
                 c, pt = self.dec(pc)
                 if c == opp and pt == KING:
                     return True
-        # Lance: sits behind sq along the file relative to opp forward.
         dr, df = (1, 0) if opp == SENTE else (-1, 0)
         f, r = f0 + df, r0 + dr
         while 1 <= f <= 9 and 1 <= r <= 9:
@@ -231,7 +256,6 @@ class Position:
                 break
             f += df
             r += dr
-        # Diagonal sliders: bishop/horse; dragon adds one diagonal step (dist 1).
         for dr, df in _BISHOP_DIRS:
             f, r = f0 + df, r0 + dr
             dist = 1
@@ -245,7 +269,6 @@ class Position:
                 f += df
                 r += dr
                 dist += 1
-        # Orthogonal sliders: rook/dragon; horse adds one orthogonal step (dist 1).
         for dr, df in _ROOK_DIRS:
             f, r = f0 + df, r0 + dr
             dist = 1

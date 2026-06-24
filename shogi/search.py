@@ -1,4 +1,9 @@
-"""Alpha-beta search with iterative deepening, quiescence, time control."""
+"""Alpha-beta search: iterative deepening, transposition table, quiescence,
+killer moves and history heuristic, USI time control.
+
+Time-out safety: a TimeUp raised mid-tree skips the pending unmake_move calls,
+so think() snapshots the root position and restores it in the TimeUp handler.
+"""
 
 import time
 from .movegen import (
@@ -7,6 +12,9 @@ from .movegen import (
 )
 from .position import Position
 from .evaluate import evaluate, VALUE, MATE
+
+EXACT, LOWER, UPPER = 0, 1, 2
+MATE_THRESH = MATE - 1000
 
 
 class TimeUp(Exception):
@@ -17,27 +25,42 @@ class Search:
     def __init__(self):
         self.nodes = 0
         self.deadline = 0.0
-        self.stop = False
+        self.tt = {}
+        self.killers = [[0, 0] for _ in range(256)]
+        self.history = {}
+        self.eval_fn = evaluate
+        self.rep = {}
+
+    def new_game(self):
+        self.tt.clear()
+        self.history.clear()
 
     def _check_time(self):
         if self.nodes & 1023 == 0 and time.time() >= self.deadline:
             raise TimeUp
 
-    def _order(self, pos, moves, tt_move=None):
+    def _order(self, pos, moves, ply, tt_move=0):
         b = pos.board
+        killers = self.killers[ply] if ply < 256 else (0, 0)
+        hist = self.history
+
         def score(m):
-            s = 0
             if m == tt_move:
                 return 1 << 30
+            s = 0
             if not m_is_drop(m):
                 cap = b[m_to(m)]
                 if cap:
                     _, cpt = Position.dec(cap)
                     _, mpt = Position.dec(b[m_from(m)])
-                    s += 1000 + VALUE[cpt] - VALUE[mpt] // 10
+                    return (1 << 20) + VALUE[cpt] * 16 - VALUE[mpt]
                 if m_is_promo(m):
-                    s += 600
-            return s
+                    s += 1 << 18
+            if m == killers[0]:
+                return (1 << 17) + 1
+            if m == killers[1]:
+                return 1 << 17
+            return s + hist.get(m, 0)
         moves.sort(key=score, reverse=True)
         return moves
 
@@ -46,22 +69,23 @@ class Search:
         self._check_time()
         in_check = pos.in_check(pos.turn)
         if not in_check:
-            stand = evaluate(pos)
+            stand = self.eval_fn(pos)
             if stand >= beta:
                 return beta
             if stand > alpha:
                 alpha = stand
         legal = generate_legal(pos)
         if not legal:
-            return -MATE + ply if in_check else evaluate(pos)
+            return -MATE + ply if in_check else self.eval_fn(pos)
         b = pos.board
-        moves = legal if in_check else [
-            m for m in legal
-            if (not m_is_drop(m) and b[m_to(m)]) or m_is_promo(m)
-        ]
-        if not in_check and not moves:
-            return alpha
-        self._order(pos, moves)
+        if in_check:
+            moves = legal
+        else:
+            moves = [m for m in legal
+                     if (not m_is_drop(m) and b[m_to(m)]) or m_is_promo(m)]
+            if not moves:
+                return alpha
+        self._order(pos, moves, ply)
         for m in moves:
             cap = make_move(pos, m)
             val = -self._qsearch(pos, -beta, -alpha, ply + 1)
@@ -75,38 +99,92 @@ class Search:
     def _negamax(self, pos, depth, alpha, beta, ply):
         self.nodes += 1
         self._check_time()
+        z = pos.zob
+        if self.rep.get(z, 0) >= 1:
+            return 0
+        alpha0 = alpha
+        tt_move = 0
+        entry = self.tt.get(pos.zob)
+        if entry is not None:
+            e_depth, e_flag, e_val, e_move = entry
+            tt_move = e_move
+            if e_depth >= depth and abs(e_val) < MATE_THRESH:
+                if e_flag == EXACT:
+                    return e_val
+                if e_flag == LOWER and e_val > alpha:
+                    alpha = e_val
+                elif e_flag == UPPER and e_val < beta:
+                    beta = e_val
+                if alpha >= beta:
+                    return e_val
+
         legal = generate_legal(pos)
         if not legal:
-            return -MATE + ply  # no legal move = loss (mate or stalemate)
+            return -MATE + ply
         if depth <= 0:
             return self._qsearch(pos, alpha, beta, ply)
-        self._order(pos, legal)
+
+        self._order(pos, legal, ply, tt_move)
+        self.rep[z] = self.rep.get(z, 0) + 1
         best = -MATE * 2
+        best_move = legal[0]
         for m in legal:
             cap = make_move(pos, m)
-            val = -self._negamax(pos, depth - 1, -beta, -alpha, ply + 1)
+            ext = 1 if (ply < 24 and pos.in_check(pos.turn)) else 0
+            val = -self._negamax(pos, depth - 1 + ext, -beta, -alpha, ply + 1)
             unmake_move(pos, m, cap)
             if val > best:
                 best = val
+                best_move = m
                 if val > alpha:
                     alpha = val
             if alpha >= beta:
+                if not m_is_drop(m) and pos.board[m_to(m)] == 0 and ply < 256:
+                    k = self.killers[ply]
+                    if k[0] != m:
+                        k[1] = k[0]
+                        k[0] = m
+                    self.history[m] = self.history.get(m, 0) + depth * depth
                 break
+
+        self.rep[z] -= 1
+        flag = EXACT
+        if best <= alpha0:
+            flag = UPPER
+        elif best >= beta:
+            flag = LOWER
+        self.tt[pos.zob] = (depth, flag, best, best_move)
         return best
 
-    def think(self, pos, max_time_s, max_depth=64, info=print):
+    def _restore(self, pos, snap):
+        pos.board[:] = snap.board
+        pos.hands[0][:] = snap.hands[0]
+        pos.hands[1][:] = snap.hands[1]
+        pos.king_sq[:] = snap.king_sq
+        pos.turn = snap.turn
+        pos.ply = snap.ply
+        pos.zob = snap.zob
+
+    def think(self, pos, max_time_s, max_depth=64, info=print, history=None):
         self.nodes = 0
         self.deadline = time.time() + max_time_s
         start = time.time()
+        self.rep = {}
+        if history:
+            for z in history:
+                self.rep[z] = self.rep.get(z, 0) + 1
+        self.rep[pos.zob] = self.rep.get(pos.zob, 0) + 1
         legal = generate_legal(pos)
         if not legal:
             return None
+        snap = pos.clone()
         best_move = legal[0]
         for depth in range(1, max_depth + 1):
             alpha, beta = -MATE * 2, MATE * 2
             local_best = None
             best_val = -MATE * 3
-            ordered = self._order(pos, list(legal), tt_move=best_move)
+            tt_mv = self.tt.get(pos.zob, (0, 0, 0, best_move))[3]
+            ordered = self._order(pos, list(legal), 0, tt_mv)
             try:
                 for m in ordered:
                     cap = make_move(pos, m)
@@ -118,19 +196,21 @@ class Search:
                         if val > alpha:
                             alpha = val
             except TimeUp:
+                self._restore(pos, snap)
                 break
             if local_best is not None:
                 best_move = local_best
+                self.tt[pos.zob] = (depth, EXACT, best_val, best_move)
                 elapsed = time.time() - start
                 nps = int(self.nodes / elapsed) if elapsed > 0 else 0
-                if abs(best_val) > MATE - 1000:
+                if abs(best_val) > MATE_THRESH:
                     mate_n = (MATE - abs(best_val) + 1) // 2
                     sc = f"mate {mate_n if best_val > 0 else -mate_n}"
                 else:
                     sc = f"cp {best_val}"
                 info(f"info depth {depth} score {sc} nodes {self.nodes} "
                      f"nps {nps} time {int(elapsed*1000)} pv {move_to_usi(best_move)}")
-                if abs(best_val) > MATE - 1000:
+                if abs(best_val) > MATE_THRESH:
                     break
             if time.time() >= self.deadline:
                 break

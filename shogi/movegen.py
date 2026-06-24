@@ -1,4 +1,4 @@
-"""Move encoding, make/unmake, pseudo-legal and legal move generation.
+"""Move encoding, make/unmake (with incremental Zobrist), legal move gen.
 
 Move int layout:
   bits 0-6   : to square (0..80)
@@ -15,6 +15,7 @@ from .position import (
     make_sq, sq_file, sq_rank, sq_to_usi, usi_to_sq,
     _GOLD_STEPS, _SILVER_STEPS, _KING_STEPS, _KNIGHT_STEPS,
     _BISHOP_DIRS, _ROOK_DIRS, step_targets,
+    ZOB_PIECE, ZOB_HAND, ZOB_SIDE,
 )
 
 DROP_BIT = 1 << 15
@@ -75,8 +76,20 @@ def _must_promote(pt, to, color):
     return False
 
 
+def _slide(b, sq, dirs):
+    f0, r0 = sq_file(sq), sq_rank(sq)
+    for dr, df in dirs:
+        f, r = f0 + df, r0 + dr
+        while 1 <= f <= 9 and 1 <= r <= 9:
+            t = make_sq(f, r)
+            yield t
+            if b[t]:
+                break
+            f += df
+            r += dr
+
+
 def _piece_targets(pos, sq, c, pt):
-    """Yield destination squares (ignoring own-piece capture filtering)."""
     b = pos.board
     if pt == PAWN:
         dr = -1 if c == SENTE else 1
@@ -102,19 +115,6 @@ def _piece_targets(pos, sq, c, pt):
     elif pt == PROOK:
         yield from _slide(b, sq, _ROOK_DIRS)
         yield from step_targets(sq, _BISHOP_DIRS)
-
-
-def _slide(b, sq, dirs):
-    f0, r0 = sq_file(sq), sq_rank(sq)
-    for dr, df in dirs:
-        f, r = f0 + df, r0 + dr
-        while 1 <= f <= 9 and 1 <= r <= 9:
-            t = make_sq(f, r)
-            yield t
-            if b[t]:
-                break
-            f += df
-            r += dr
 
 
 def generate_pseudo(pos):
@@ -148,7 +148,6 @@ def _generate_drops(pos, moves):
     hand = pos.hands[c]
     if not any(hand):
         return
-    # files that already contain an own unpromoted pawn (for nifu)
     pawn_files = set()
     for sq in range(81):
         v = b[sq]
@@ -178,29 +177,46 @@ def _generate_drops(pos, moves):
 
 
 def make_move(pos, m):
-    """Apply move, return undo token (captured piece value, 0 if none)."""
+    """Apply move, update Zobrist, return captured piece value (0 if none)."""
     b = pos.board
     c = pos.turn
     to = m_to(m)
+    z = pos.zob
     captured = 0
     if m_is_drop(m):
         pt = m_from(m)
-        pos.hands[c][pt] -= 1
-        b[to] = Position.enc(c, pt)
+        old = pos.hands[c][pt]
+        z ^= ZOB_HAND[c][pt][old]
+        pos.hands[c][pt] = old - 1
+        if old - 1:
+            z ^= ZOB_HAND[c][pt][old - 1]
+        pv = Position.enc(c, pt)
+        b[to] = pv
+        z ^= ZOB_PIECE[to][pv]
     else:
         frm = m_from(m)
         v = b[frm]
         _, pt = Position.dec(v)
         captured = b[to]
         if captured:
+            z ^= ZOB_PIECE[to][captured]
             _, cpt = Position.dec(captured)
-            pos.hands[c][UNPROMOTE[cpt]] += 1
-        if m_is_promo(m):
-            pt = PROMOTE[pt]
-        b[to] = Position.enc(c, pt)
+            ht = UNPROMOTE[cpt]
+            old = pos.hands[c][ht]
+            if old:
+                z ^= ZOB_HAND[c][ht][old]
+            pos.hands[c][ht] = old + 1
+            z ^= ZOB_HAND[c][ht][old + 1]
+        newpt = PROMOTE[pt] if m_is_promo(m) else pt
+        pv = Position.enc(c, newpt)
+        b[to] = pv
+        z ^= ZOB_PIECE[to][pv]
+        z ^= ZOB_PIECE[frm][v]
         b[frm] = 0
-        if pt == KING:
+        if newpt == KING:
             pos.king_sq[c] = to
+    z ^= ZOB_SIDE
+    pos.zob = z
     pos.turn = 1 - c
     pos.ply += 1
     return captured
@@ -210,24 +226,41 @@ def unmake_move(pos, m, captured):
     c = 1 - pos.turn  # mover
     b = pos.board
     to = m_to(m)
+    z = pos.zob ^ ZOB_SIDE
     pos.turn = c
     pos.ply -= 1
     if m_is_drop(m):
         pt = m_from(m)
-        pos.hands[c][pt] += 1
+        pv = b[to]
+        z ^= ZOB_PIECE[to][pv]
         b[to] = 0
+        old = pos.hands[c][pt]
+        if old:
+            z ^= ZOB_HAND[c][pt][old]
+        pos.hands[c][pt] = old + 1
+        z ^= ZOB_HAND[c][pt][old + 1]
     else:
         frm = m_from(m)
-        _, pt = Position.dec(b[to])
-        if m_is_promo(m):
-            pt = UNPROMOTE[pt]
-        b[frm] = Position.enc(c, pt)
+        pv = b[to]
+        _, newpt = Position.dec(pv)
+        z ^= ZOB_PIECE[to][pv]
+        pt = UNPROMOTE[newpt] if m_is_promo(m) else newpt
+        ov = Position.enc(c, pt)
+        b[frm] = ov
+        z ^= ZOB_PIECE[frm][ov]
         b[to] = captured
         if captured:
+            z ^= ZOB_PIECE[to][captured]
             _, cpt = Position.dec(captured)
-            pos.hands[c][UNPROMOTE[cpt]] -= 1
+            ht = UNPROMOTE[cpt]
+            old = pos.hands[c][ht]
+            z ^= ZOB_HAND[c][ht][old]
+            pos.hands[c][ht] = old - 1
+            if old - 1:
+                z ^= ZOB_HAND[c][ht][old - 1]
         if pt == KING:
             pos.king_sq[c] = frm
+    pos.zob = z
 
 
 def _has_any_legal(pos):
@@ -247,7 +280,6 @@ def generate_legal(pos):
         mover = 1 - pos.turn
         if not pos.in_check(mover):
             ok = True
-            # uchifuzume: pawn drop that delivers immediate mate is illegal
             if m_is_drop(m) and m_from(m) == PAWN and pos.in_check(pos.turn):
                 if not _has_any_legal(pos):
                     ok = False

@@ -3,3 +3,10 @@ __pycache__/
 *.log
 .venv/
 patch*.py
+# scratch / dev verification scripts and runtime game state
+xcheck.py
+repro*.py
+verify_*.py
+smoke_*.py
+zobcheck.py
+.game.json
