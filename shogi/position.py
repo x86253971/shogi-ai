@@ -1,8 +1,7 @@
-"""Shogi board representation, SFEN I/O, attack detection, Zobrist hashing.
+"""Shogi board, SFEN I/O, attack detection (table-driven), Zobrist hashing.
 
-Square indexing: sq = (rank-1)*9 + (9-file), so sq 0 = file9/rank1, sq 80 =
-file1/rank9. Sente (Black, color 0) moves toward rank 1 (index decreasing).
-Gote (White, color 1) moves toward rank 9.
+Square indexing: sq = (rank-1)*9 + (9-file). Sente (Black, 0) moves toward
+rank 1 (index decreasing); Gote (White, 1) toward rank 9.
 """
 
 import random as _random
@@ -25,17 +24,25 @@ SFEN_PROM_CHAR = {PPAWN: "P", PLANCE: "L", PKNIGHT: "N", PSILVER: "S",
                   PBISHOP: "B", PROOK: "R"}
 CHAR_TO_TYPE = {"P": PAWN, "L": LANCE, "N": KNIGHT, "S": SILVER,
                 "G": GOLD, "B": BISHOP, "R": ROOK, "K": KING}
-
-# Display glyphs (romaji), lowercase for Gote, "+" prefix for promoted.
 DISP = ["P", "L", "N", "S", "G", "B", "R", "K",
         "+P", "+L", "+N", "+S", "+B", "+R"]
 
-# --- Zobrist tables (fixed seed for reproducibility) ---
 _rng = _random.Random(0xC0FFEE)
 ZOB_PIECE = [[_rng.getrandbits(64) for _ in range(29)] for _ in range(81)]
 ZOB_HAND = [[[_rng.getrandbits(64) for _ in range(19)] for _ in range(7)]
             for _ in range(2)]
 ZOB_SIDE = _rng.getrandbits(64)
+
+# Decode tables indexed by piece value (1..28); 0 = empty.
+PCOLOR = [0] * 29
+PTYPE = [0] * 29
+for _v in range(1, 29):
+    PCOLOR[_v] = (_v - 1) // NUM_PTYPES
+    PTYPE[_v] = (_v - 1) % NUM_PTYPES
+
+_GOLDSET = frozenset({GOLD, PPAWN, PLANCE, PKNIGHT, PSILVER})
+_BISHOPSET = frozenset({BISHOP, PBISHOP})
+_ROOKSET = frozenset({ROOK, PROOK})
 
 
 def sq_file(sq):
@@ -81,6 +88,69 @@ def step_targets(sq, steps):
         nf, nr = f + df, r + dr
         if 1 <= nf <= 9 and 1 <= nr <= 9:
             yield make_sq(nf, nr)
+
+
+# --- Precomputed attack-origin tables (built once) ---
+def _step_from(steps_by_color):
+    tbl = [[[] for _ in range(81)] for _ in range(2)]
+    for opp in (0, 1):
+        for sq in range(81):
+            f0, r0 = sq_file(sq), sq_rank(sq)
+            for dr, df in steps_by_color[opp]:
+                nf, nr = f0 - df, r0 - dr
+                if 1 <= nf <= 9 and 1 <= nr <= 9:
+                    tbl[opp][sq].append(make_sq(nf, nr))
+    return tbl
+
+
+GOLD_FROM = _step_from(_GOLD_STEPS)
+SILVER_FROM = _step_from(_SILVER_STEPS)
+KNIGHT_FROM = _step_from(_KNIGHT_STEPS)
+
+KING_FROM = [[] for _ in range(81)]
+for _sq in range(81):
+    _f0, _r0 = sq_file(_sq), sq_rank(_sq)
+    for _dr, _df in _KING_STEPS:
+        _nf, _nr = _f0 + _df, _r0 + _dr
+        if 1 <= _nf <= 9 and 1 <= _nr <= 9:
+            KING_FROM[_sq].append(make_sq(_nf, _nr))
+
+PAWN_FROM = [[-1] * 81 for _ in range(2)]
+for _opp in (0, 1):
+    _pdr = -1 if _opp == SENTE else 1
+    for _sq in range(81):
+        _r = sq_rank(_sq) - _pdr
+        if 1 <= _r <= 9:
+            PAWN_FROM[_opp][_sq] = make_sq(sq_file(_sq), _r)
+
+LANCE_RAY = [[[] for _ in range(81)] for _ in range(2)]
+for _opp in (0, 1):
+    _dr = 1 if _opp == SENTE else -1
+    for _sq in range(81):
+        _f0, _r0 = sq_file(_sq), sq_rank(_sq)
+        _r = _r0 + _dr
+        while 1 <= _r <= 9:
+            LANCE_RAY[_opp][_sq].append(make_sq(_f0, _r))
+            _r += _dr
+
+
+def _rays(sq, dirs):
+    out = []
+    f0, r0 = sq_file(sq), sq_rank(sq)
+    for dr, df in dirs:
+        ray = []
+        f, r = f0 + df, r0 + dr
+        while 1 <= f <= 9 and 1 <= r <= 9:
+            ray.append(make_sq(f, r))
+            f += df
+            r += dr
+        if ray:
+            out.append(tuple(ray))
+    return out
+
+
+BISHOP_RAYS = [_rays(sq, _BISHOP_DIRS) for sq in range(81)]
+ROOK_RAYS = [_rays(sq, _ROOK_DIRS) for sq in range(81)]
 
 
 class Position:
@@ -210,78 +280,53 @@ class Position:
 
     def is_attacked(self, sq, opp):
         b = self.board
-        f0, r0 = sq_file(sq), sq_rank(sq)
-
-        def at(f, r):
-            return b[make_sq(f, r)] if (1 <= f <= 9 and 1 <= r <= 9) else None
-
-        for dr, df in _GOLD_STEPS[opp]:
-            pc = at(f0 - df, r0 - dr)
-            if pc:
-                c, pt = self.dec(pc)
-                if c == opp and pt in (GOLD, PPAWN, PLANCE, PKNIGHT, PSILVER):
-                    return True
-        for dr, df in _SILVER_STEPS[opp]:
-            pc = at(f0 - df, r0 - dr)
-            if pc:
-                c, pt = self.dec(pc)
-                if c == opp and pt == SILVER:
-                    return True
-        for dr, df in _KNIGHT_STEPS[opp]:
-            pc = at(f0 - df, r0 - dr)
-            if pc:
-                c, pt = self.dec(pc)
-                if c == opp and pt == KNIGHT:
-                    return True
-        pawn_dr = -1 if opp == SENTE else 1
-        pc = at(f0, r0 - pawn_dr)
-        if pc:
-            c, pt = self.dec(pc)
-            if c == opp and pt == PAWN:
+        for o in GOLD_FROM[opp][sq]:
+            v = b[o]
+            if v and PCOLOR[v] == opp and PTYPE[v] in _GOLDSET:
                 return True
-        for dr, df in _KING_STEPS:
-            pc = at(f0 - df, r0 - dr)
-            if pc:
-                c, pt = self.dec(pc)
-                if c == opp and pt == KING:
-                    return True
-        dr, df = (1, 0) if opp == SENTE else (-1, 0)
-        f, r = f0 + df, r0 + dr
-        while 1 <= f <= 9 and 1 <= r <= 9:
-            v = b[make_sq(f, r)]
+        for o in SILVER_FROM[opp][sq]:
+            v = b[o]
+            if v and PCOLOR[v] == opp and PTYPE[v] == SILVER:
+                return True
+        for o in KNIGHT_FROM[opp][sq]:
+            v = b[o]
+            if v and PCOLOR[v] == opp and PTYPE[v] == KNIGHT:
+                return True
+        o = PAWN_FROM[opp][sq]
+        if o >= 0:
+            v = b[o]
+            if v and PCOLOR[v] == opp and PTYPE[v] == PAWN:
+                return True
+        for o in KING_FROM[sq]:
+            v = b[o]
+            if v and PCOLOR[v] == opp and PTYPE[v] == KING:
+                return True
+        for o in LANCE_RAY[opp][sq]:
+            v = b[o]
             if v:
-                c, pt = self.dec(v)
-                if c == opp and pt == LANCE:
+                if PCOLOR[v] == opp and PTYPE[v] == LANCE:
                     return True
                 break
-            f += df
-            r += dr
-        for dr, df in _BISHOP_DIRS:
-            f, r = f0 + df, r0 + dr
-            dist = 1
-            while 1 <= f <= 9 and 1 <= r <= 9:
-                v = b[make_sq(f, r)]
+        for ray in BISHOP_RAYS[sq]:
+            first = True
+            for o in ray:
+                v = b[o]
                 if v:
-                    c, pt = self.dec(v)
-                    if c == opp and (pt in (BISHOP, PBISHOP) or (dist == 1 and pt == PROOK)):
+                    if PCOLOR[v] == opp and (PTYPE[v] in _BISHOPSET
+                                             or (first and PTYPE[v] == PROOK)):
                         return True
                     break
-                f += df
-                r += dr
-                dist += 1
-        for dr, df in _ROOK_DIRS:
-            f, r = f0 + df, r0 + dr
-            dist = 1
-            while 1 <= f <= 9 and 1 <= r <= 9:
-                v = b[make_sq(f, r)]
+                first = False
+        for ray in ROOK_RAYS[sq]:
+            first = True
+            for o in ray:
+                v = b[o]
                 if v:
-                    c, pt = self.dec(v)
-                    if c == opp and (pt in (ROOK, PROOK) or (dist == 1 and pt == PBISHOP)):
+                    if PCOLOR[v] == opp and (PTYPE[v] in _ROOKSET
+                                             or (first and PTYPE[v] == PBISHOP)):
                         return True
                     break
-                f += df
-                r += dr
-                dist += 1
+                first = False
         return False
 
     def in_check(self, color=None):
