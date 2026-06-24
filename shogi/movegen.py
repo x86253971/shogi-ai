@@ -314,7 +314,10 @@ def _has_any_legal(pos):
 
 def generate_legal(pos):
     legal = []
+    board = pos.board
     for m in generate_pseudo(pos):
+        if not m_is_drop(m) and board[m_to(m)] and Position.dec(board[m_to(m)])[1] == KING:
+            continue  # never capture a king (defensive; legal positions have none)
         cap = _make_light(pos, m)
         mover = 1 - pos.turn
         if not pos.in_check(mover):
