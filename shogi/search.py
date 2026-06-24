@@ -32,6 +32,7 @@ class Search:
         self.eval_fn = evaluate
         self.rep = {}
         self.max_nodes = 0
+        self.use_pvs = True
 
     def new_game(self):
         self.tt.clear()
@@ -133,11 +134,19 @@ class Search:
         self.rep[z] = self.rep.get(z, 0) + 1
         best = -MATE * 2
         best_move = legal[0]
+        searched = False
         for m in legal:
             cap = make_move(pos, m)
             ext = 1 if (ply < 24 and pos.in_check(pos.turn)) else 0
-            val = -self._negamax(pos, depth - 1 + ext, -beta, -alpha, ply + 1)
+            nd = depth - 1 + ext
+            if self.use_pvs and searched:
+                val = -self._negamax(pos, nd, -alpha - 1, -alpha, ply + 1)
+                if alpha < val < beta:
+                    val = -self._negamax(pos, nd, -beta, -alpha, ply + 1)
+            else:
+                val = -self._negamax(pos, nd, -beta, -alpha, ply + 1)
             unmake_move(pos, m, cap)
+            searched = True
             if val > best:
                 best = val
                 best_move = m

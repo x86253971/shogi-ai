@@ -12,5 +12,7 @@ zobcheck.py
 nps.py
 prof.py
 matecheck.py
+robust.py
+nps.py
 match_*.py
 .game.json
