@@ -152,6 +152,11 @@ def _rays(sq, dirs):
 BISHOP_RAYS = [_rays(sq, _BISHOP_DIRS) for sq in range(81)]
 ROOK_RAYS = [_rays(sq, _ROOK_DIRS) for sq in range(81)]
 
+# Per-square file/rank and pairwise Chebyshev distance (for evaluation).
+FILE_OF = [sq_file(s) for s in range(81)]
+RANK_OF = [sq_rank(s) for s in range(81)]
+CHEBY = [[max(abs(FILE_OF[a] - FILE_OF[b]), abs(RANK_OF[a] - RANK_OF[b]))
+          for b in range(81)] for a in range(81)]
 
 class Position:
     __slots__ = ("board", "hands", "turn", "ply", "king_sq", "zob")
