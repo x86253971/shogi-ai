@@ -11,6 +11,7 @@ from .movegen import (
     m_to, m_from, m_is_drop, m_is_promo, move_to_usi,
 )
 from .position import Position
+from .mate import find_mate
 from .evaluate import evaluate, VALUE, MATE
 
 EXACT, LOWER, UPPER = 0, 1, 2
@@ -184,6 +185,11 @@ class Search:
             return None
         snap = pos.clone()
         best_move = legal[0]
+        mate_move, mate_in = find_mate(pos, max_plies=7, node_cap=50000)
+        if mate_move is not None:
+            info(f"info depth {mate_in * 2 - 1} score mate {mate_in} "
+                 f"nodes {self.nodes} pv {move_to_usi(mate_move)}")
+            return mate_move
         for depth in range(1, max_depth + 1):
             alpha, beta = -MATE * 2, MATE * 2
             local_best = None

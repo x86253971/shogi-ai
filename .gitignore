@@ -11,5 +11,6 @@ smoke_*.py
 zobcheck.py
 nps.py
 prof.py
+matecheck.py
 match_*.py
 .game.json

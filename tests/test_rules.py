@@ -81,6 +81,21 @@ class TestRules(unittest.TestCase):
             self.assertIn(best, legal)
             make_move(pos, best)
 
+    def test_mate_search_finds_mate_in_1(self):
+        from shogi.mate import find_mate
+        pos = Position.from_sfen("4k4/9/4G4/9/9/9/9/9/4K4 b G 1")
+        m, n = find_mate(pos, 7)
+        self.assertIsNotNone(m)
+        self.assertEqual(n, 1)
+        self.assertEqual(move_to_usi(m), "G*5b")
+        best = Search().think(pos, 1.0, max_depth=4, info=lambda *_: None)
+        self.assertEqual(move_to_usi(best), "G*5b")
+
+    def test_mate_search_no_false_positive(self):
+        from shogi.mate import find_mate
+        m, _ = find_mate(Position.startpos(), 7)
+        self.assertIsNone(m)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
