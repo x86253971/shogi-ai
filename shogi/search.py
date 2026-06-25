@@ -10,7 +10,7 @@ from .movegen import (
     generate_legal, make_move, unmake_move,
     m_to, m_from, m_is_drop, m_is_promo, move_to_usi,
 )
-from .position import Position
+from .position import Position, ZOB_SIDE
 from .mate import find_mate
 from .evaluate import evaluate, VALUE, MATE
 
@@ -34,6 +34,7 @@ class Search:
         self.max_nodes = 0
         self.use_pvs = True
         self.use_lmr = True
+        self.use_nmp = True
 
     def new_game(self):
         self.tt.clear()
@@ -102,7 +103,7 @@ class Search:
                 alpha = val
         return alpha
 
-    def _negamax(self, pos, depth, alpha, beta, ply):
+    def _negamax(self, pos, depth, alpha, beta, ply, null_ok=True):
         self.nodes += 1
         self._check_time()
         z = pos.zob
@@ -130,6 +131,22 @@ class Search:
         if depth <= 0:
             return self._qsearch(pos, alpha, beta, ply)
 
+        in_check = pos.in_check(pos.turn)
+
+        # Null-move pruning: give the opponent a free move; if our position is
+        # still so strong that it fails high, prune. Skipped when in check, in
+        # shallow/mate searches, or after a prior null (no consecutive nulls).
+        if (self.use_nmp and null_ok and depth >= 3 and not in_check
+                and beta < MATE_THRESH and beta > -MATE_THRESH):
+            R = 3 if depth >= 6 else 2
+            pos.turn ^= 1
+            pos.zob ^= ZOB_SIDE
+            val = -self._negamax(pos, depth - 1 - R, -beta, -beta + 1,
+                                 ply + 1, null_ok=False)
+            pos.turn ^= 1
+            pos.zob ^= ZOB_SIDE
+            if val >= beta:
+                return beta
 
         self._order(pos, legal, ply, tt_move)
         self.rep[z] = self.rep.get(z, 0) + 1
