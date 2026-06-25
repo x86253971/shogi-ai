@@ -33,6 +33,7 @@ class Search:
         self.rep = {}
         self.max_nodes = 0
         self.use_pvs = True
+        self.use_lmr = True
 
     def new_game(self):
         self.tt.clear()
@@ -134,19 +135,25 @@ class Search:
         self.rep[z] = self.rep.get(z, 0) + 1
         best = -MATE * 2
         best_move = legal[0]
-        searched = False
+        move_count = 0
         for m in legal:
+            is_tactical = ((not m_is_drop(m) and pos.board[m_to(m)] != 0)
+                           or m_is_promo(m))
             cap = make_move(pos, m)
+            move_count += 1
             ext = 1 if (ply < 24 and pos.in_check(pos.turn)) else 0
             nd = depth - 1 + ext
-            if self.use_pvs and searched:
-                val = -self._negamax(pos, nd, -alpha - 1, -alpha, ply + 1)
+            if move_count == 1 or not self.use_pvs:
+                val = -self._negamax(pos, nd, -beta, -alpha, ply + 1)
+            else:
+                reduce = 1 if (self.use_lmr and depth >= 3 and move_count > 3
+                               and ext == 0 and not is_tactical) else 0
+                val = -self._negamax(pos, nd - reduce, -alpha - 1, -alpha, ply + 1)
+                if reduce and val > alpha:
+                    val = -self._negamax(pos, nd, -alpha - 1, -alpha, ply + 1)
                 if alpha < val < beta:
                     val = -self._negamax(pos, nd, -beta, -alpha, ply + 1)
-            else:
-                val = -self._negamax(pos, nd, -beta, -alpha, ply + 1)
             unmake_move(pos, m, cap)
-            searched = True
             if val > best:
                 best = val
                 best_move = m
