@@ -35,6 +35,7 @@ class Search:
         self.use_pvs = True
         self.use_lmr = True
         self.use_nmp = True
+        self.use_rfp = True
 
     def new_game(self):
         self.tt.clear()
@@ -132,6 +133,15 @@ class Search:
             return self._qsearch(pos, alpha, beta, ply)
 
         in_check = pos.in_check(pos.turn)
+
+        # Reverse futility pruning (static null move): in a shallow, non-PV
+        # search where we are not in check, if the static eval already exceeds
+        # beta by a wide depth-scaled margin, assume it holds and prune.
+        if (self.use_rfp and not in_check and depth <= 4
+                and beta < MATE_THRESH and beta > -MATE_THRESH):
+            se = self.eval_fn(pos)
+            if se - 120 * depth >= beta:
+                return se
 
         # Null-move pruning: give the opponent a free move; if our position is
         # still so strong that it fails high, prune. Skipped when in check, in
