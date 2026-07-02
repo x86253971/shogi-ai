@@ -36,6 +36,7 @@ class Search:
         self.use_lmr = True
         self.use_nmp = True
         self.use_rfp = True
+        self.use_asp = True
 
     def new_game(self):
         self.tt.clear()
@@ -213,6 +214,34 @@ class Search:
         pos.ply = snap.ply
         pos.zob = snap.zob
 
+    def _root(self, pos, depth, alpha, beta, legal):
+        """Search all root moves with a given window (root PVS). Returns
+        (best_val, best_move). Raises TimeUp on timeout (handled by caller)."""
+        local_best = None
+        best_val = -MATE * 3
+        tt_mv = self.tt.get(pos.zob, (0, 0, 0, legal[0]))[3]
+        ordered = self._order(pos, list(legal), 0, tt_mv)
+        a = alpha
+        first = True
+        for m in ordered:
+            cap = make_move(pos, m)
+            if first or not self.use_pvs:
+                val = -self._negamax(pos, depth - 1, -beta, -a, 1)
+            else:
+                val = -self._negamax(pos, depth - 1, -a - 1, -a, 1)
+                if a < val < beta:
+                    val = -self._negamax(pos, depth - 1, -beta, -a, 1)
+            unmake_move(pos, m, cap)
+            first = False
+            if val > best_val:
+                best_val = val
+                local_best = m
+                if val > a:
+                    a = val
+            if a >= beta:
+                break
+        return best_val, local_best
+
     def think(self, pos, max_time_s, max_depth=64, info=print, history=None,
               max_nodes=0):
         self.nodes = 0
@@ -234,26 +263,34 @@ class Search:
             info(f"info depth {mate_in * 2 - 1} score mate {mate_in} "
                  f"nodes {self.nodes} pv {move_to_usi(mate_move)}")
             return mate_move
+        prev = None
         for depth in range(1, max_depth + 1):
-            alpha, beta = -MATE * 2, MATE * 2
-            local_best = None
-            best_val = -MATE * 3
-            tt_mv = self.tt.get(pos.zob, (0, 0, 0, best_move))[3]
-            ordered = self._order(pos, list(legal), 0, tt_mv)
             try:
-                for m in ordered:
-                    cap = make_move(pos, m)
-                    val = -self._negamax(pos, depth - 1, -beta, -alpha, 1)
-                    unmake_move(pos, m, cap)
-                    if val > best_val:
-                        best_val = val
-                        local_best = m
-                        if val > alpha:
-                            alpha = val
+                if (not self.use_asp or prev is None or depth < 4
+                        or abs(prev) >= MATE_THRESH):
+                    best_val, local_best = self._root(
+                        pos, depth, -MATE * 2, MATE * 2, legal)
+                else:
+                    win = 30
+                    alpha, beta = prev - win, prev + win
+                    while True:
+                        best_val, local_best = self._root(
+                            pos, depth, alpha, beta, legal)
+                        if best_val <= alpha:
+                            alpha = max(-MATE * 2, alpha - win * 3)
+                            win *= 4
+                        elif best_val >= beta:
+                            beta = min(MATE * 2, beta + win * 3)
+                            win *= 4
+                        else:
+                            break
+                        if win > 1200:
+                            alpha, beta = -MATE * 2, MATE * 2
             except TimeUp:
                 self._restore(pos, snap)
                 break
             if local_best is not None:
+                prev = best_val
                 best_move = local_best
                 self.tt[pos.zob] = (depth, EXACT, best_val, best_move)
                 elapsed = time.time() - start
